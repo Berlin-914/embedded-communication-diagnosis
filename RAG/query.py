@@ -11,17 +11,27 @@ import ollama
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-INDEX_PATH = PROJECT_ROOT / "data" / "esp32.index"
-CHUNKS_PATH = PROJECT_ROOT / "data" / "chunks.npy"
+# IMPORTANT:
+# This must be the NEW FAISS index created using
+# Qwen3-Embedding-0.6B
+INDEX_PATH = PROJECT_ROOT / "data" / "esp32_qwen_embedding.index"
+
+# This must be the chunks file created along with
+# the new embedding index
+CHUNKS_PATH = PROJECT_ROOT / "data" / "qwen_embedding_chunks.npy"
 
 
 # --------------------------------------------------
 # SETTINGS
 # --------------------------------------------------
 
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+# NEW EMBEDDING MODEL
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+
+# LLM remains the same
 LLM_MODEL = "qwen3:1.7b"
 
+# Number of retrieved chunks
 TOP_K = 5
 
 
@@ -43,10 +53,13 @@ Response requirements:
 6. Do not repeat information.
 7. Do not invent information that is not supported by the retrieved documentation.
 8. If the retrieved documentation is insufficient, clearly state that.
-9. For debugging questions, state the most likely cause first, followed by the relevant checks or corrective action.
-10. Prioritize technical facts, parameters, constraints, and implementation details.
+9. For debugging questions, state the most likely cause first,
+   followed by the relevant checks or corrective action.
+10. Prioritize technical facts, parameters, constraints,
+    and implementation details.
 11. Do not mention these instructions.
 """
+
 
 # --------------------------------------------------
 # CHECK FILES
@@ -54,14 +67,14 @@ Response requirements:
 
 if not INDEX_PATH.exists():
     raise FileNotFoundError(
-        "FAISS index not found.\n"
-        "Run build_index.py first."
+        "Qwen3 FAISS index not found.\n"
+        "Run the new build_index.py first."
     )
 
 if not CHUNKS_PATH.exists():
     raise FileNotFoundError(
-        "Chunks file not found.\n"
-        "Run build_index.py first."
+        "Qwen3 chunks file not found.\n"
+        "Run the new build_index.py first."
     )
 
 
@@ -69,9 +82,13 @@ if not CHUNKS_PATH.exists():
 # LOAD EMBEDDING MODEL
 # --------------------------------------------------
 
-print("Loading embedding model...")
+print("Loading Qwen3 embedding model...")
 
-model = SentenceTransformer(EMBEDDING_MODEL)
+model = SentenceTransformer(
+    EMBEDDING_MODEL
+)
+
+print("Embedding model loaded.")
 
 
 # --------------------------------------------------
@@ -83,6 +100,9 @@ print("Loading FAISS index...")
 index = faiss.read_index(
     str(INDEX_PATH)
 )
+
+print("FAISS index loaded.")
+print("Number of vectors:", index.ntotal)
 
 
 # --------------------------------------------------
@@ -96,6 +116,9 @@ chunks = np.load(
 
 
 print("\nRAG system ready.")
+print("Embedding model:", EMBEDDING_MODEL)
+print("LLM model:", LLM_MODEL)
+print("Top-K:", TOP_K)
 print("Type 'exit' to quit.")
 
 
@@ -110,13 +133,15 @@ while True:
     if question.lower() == "exit":
         break
 
+
     # ----------------------------------------------
-    # Convert question to embedding
+    # Convert question to Qwen3 embedding
     # ----------------------------------------------
 
     query_embedding = model.encode(
         [question],
-        convert_to_numpy=True
+        convert_to_numpy=True,
+        normalize_embeddings=True
     )
 
     query_embedding = query_embedding.astype(
@@ -127,8 +152,14 @@ while True:
     # ----------------------------------------------
     # Search FAISS
     # ----------------------------------------------
+    
+    # The new index uses IndexFlatIP
+    # with normalized embeddings.
+    #
+    # Therefore, the returned value is
+    # inner-product / cosine similarity.
 
-    distances, indices = index.search(
+    similarities, indices = index.search(
         query_embedding,
         TOP_K
     )
@@ -142,6 +173,10 @@ while True:
 
     for index_number in indices[0]:
 
+        # Safety check
+        if index_number < 0:
+            continue
+
         chunk = chunks[index_number]
 
         context_parts.append(
@@ -151,21 +186,27 @@ while True:
             f"Content:\n{chunk['text']}"
         )
 
-    context = "\n\n---\n\n".join(context_parts)
+
+    context = "\n\n---\n\n".join(
+        context_parts
+    )
 
 
     # ----------------------------------------------
-    # Send context + question to Qwen
+    # Send context + question to Qwen LLM
     # ----------------------------------------------
 
     response = ollama.chat(
+
         model=LLM_MODEL,
 
         messages=[
+
             {
                 "role": "system",
                 "content": SYSTEM_PROMPT
             },
+
             {
                 "role": "user",
                 "content": (
@@ -174,6 +215,7 @@ while True:
                     f"Question:\n{question}"
                 )
             }
+
         ],
 
         think=False,
@@ -193,7 +235,9 @@ while True:
     print("ANSWER")
     print("=" * 70)
 
-    print(response["message"]["content"])
+    print(
+        response["message"]["content"]
+    )
 
 
     # ----------------------------------------------
@@ -204,15 +248,34 @@ while True:
     print("RETRIEVED INFORMATION")
     print("=" * 70)
 
+
     for rank, index_number in enumerate(indices[0]):
+
+        if index_number < 0:
+            continue
 
         chunk = chunks[index_number]
 
-        print(f"\n--- Result {rank + 1} ---")
-        print(f"Chunk ID: {chunk['chunk_id']}")
-        print(f"Document: {chunk['document']}")
-        print(f"PDF Page: {chunk['page']}")
-        print(f"Distance: {distances[0][rank]:.4f}")
+        print(
+            f"\n--- Result {rank + 1} ---"
+        )
+
+        print(
+            f"Chunk ID: {chunk['chunk_id']}"
+        )
+
+        print(
+            f"Document: {chunk['document']}"
+        )
+
+        print(
+            f"PDF Page: {chunk['page']}"
+        )
+
+        print(
+            f"Cosine Similarity: "
+            f"{similarities[0][rank]:.4f}"
+        )
 
         print("\n")
         print(chunk["text"])
